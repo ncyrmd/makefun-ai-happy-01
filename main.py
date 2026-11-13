@@ -7,9 +7,13 @@ meadow at golden hour, butterflies all around it. This script does the
 only thing the entry needs: it places a copy of that image where the
 grader looks for it, at <output directory>/entry.png.
 
-Before copying it confirms art.png really is a PNG by checking its
-8-byte signature, and after copying it compares byte sizes, so a corrupt
-or truncated file fails loudly instead of silently producing a bad entry.
+The gate scorer only accepts a whole PNG or JPEG of at most 1 MiB and at
+most 1024x1024 pixels, so before copying this script enforces exactly
+those limits on art.png: it checks the 8-byte PNG signature, reads the
+width and height straight out of the IHDR chunk, and checks the file size.
+Anything over the limits fails loudly instead of silently producing an
+entry the grader rejects. After copying it compares byte sizes, so a
+corrupt or truncated file fails loudly too.
 
 Contract with the grader:
   - exit code 0 means entry.png was written and verified;
@@ -22,18 +26,27 @@ grading sandbox installs nothing before it runs this script.
 
 import os
 import shutil
+import struct
 import sys
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_BYTES = 1_048_576          # gate limit: at most 1 MiB
+MAX_DIMENSION = 1024           # gate limit: at most 1024x1024 pixels
 
 
-def is_png(path: str) -> bool:
-    """True when the file starts with the 8-byte PNG signature."""
+def png_dimensions(path: str):
+    """Return (width, height) from the PNG IHDR chunk, or None if unreadable."""
     try:
         with open(path, "rb") as handle:
-            return handle.read(len(PNG_SIGNATURE)) == PNG_SIGNATURE
+            header = handle.read(24)
     except OSError:
-        return False
+        return None
+    if len(header) < 24 or header[:8] != PNG_SIGNATURE:
+        return None
+    if header[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", header[16:24])
+    return width, height
 
 
 def fail(message: str) -> int:
@@ -49,8 +62,19 @@ def main() -> int:
     if not os.path.isfile(source):
         return fail("art.png is missing from this repository")
 
-    if not is_png(source):
-        return fail("art.png does not start with a PNG signature")
+    size = os.path.getsize(source)
+    if size > MAX_BYTES:
+        return fail(f"art.png is {size} bytes, over the {MAX_BYTES} byte limit")
+
+    dimensions = png_dimensions(source)
+    if dimensions is None:
+        return fail("art.png does not start with a valid PNG header")
+    width, height = dimensions
+    if width > MAX_DIMENSION or height > MAX_DIMENSION:
+        return fail(
+            f"art.png is {width}x{height}, over the "
+            f"{MAX_DIMENSION}x{MAX_DIMENSION} limit"
+        )
 
     out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     os.makedirs(out_dir, exist_ok=True)
@@ -59,11 +83,16 @@ def main() -> int:
     shutil.copyfile(source, destination)
 
     copied = os.path.getsize(destination)
-    original = os.path.getsize(source)
-    if copied != original:
-        return fail(f"copy incomplete: {copied} of {original} bytes written")
+    if copied != size:
+        return fail(f"copy incomplete: {copied} of {size} bytes written")
 
-    print(f"wrote {destination} ({copied} bytes)")
+    out_dimensions = png_dimensions(destination)
+    if out_dimensions != dimensions:
+        return fail(
+            f"output header mismatch: {out_dimensions} instead of {dimensions}"
+        )
+
+    print(f"wrote {destination} ({copied} bytes, {width}x{height})")
     return 0
 
 
