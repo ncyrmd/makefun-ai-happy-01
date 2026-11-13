@@ -1,32 +1,34 @@
 #!/usr/bin/env python3
-"""Entry program for make.fun's "Make the AI judge happy" bounty.
+"""Put "Golden Hour Joy" where the grader can find it.
 
-The artwork, "Golden Hour Joy", is already in this repository as art.png:
-a baby elephant calf splashing in a shallow puddle at golden-hour
-sunset, trunk raised high spraying a sparkling arc of water, ears
-flared wide, eyes squeezed shut in delight, warm orange-pink sky all
-around it. A single joyful moment, not a stock scene: the calf is big
-in the frame, the spray catches the low sun like sparks, and the whole
-image pulls toward one warm mood. This script does the only thing the
-entry needs: it places a copy of that image where the grader looks for
-it, at <output directory>/entry.png.
+The picture is finished and already lives in this repository as
+art.png: a capybara soaking in a steaming Japanese onsen at golden
+hour, eyes shut in total bliss, a round yellow yuzu fruit perched on
+top of its head, cherry-blossom petals floating through the warm
+steam. Its charm is one very specific, very contented moment — a
+winter-solstice yuzu bath, not a generic cute animal — and the
+animal's huge face stays legible even shrunk to a thumbnail.
 
-The gate scorer only accepts a whole PNG or JPEG of at most 1 MiB and at
-most 1024x1024 pixels, so before copying this script enforces exactly
-those limits on art.png: it checks the 8-byte PNG signature, reads the
-width and height straight out of the IHDR chunk, and checks the file
-size. Anything over the limits fails loudly instead of silently
-producing an entry the grader rejects. After copying it compares byte
-sizes and re-reads the output file's PNG header, so a corrupt or
-truncated file fails loudly too.
+This program has exactly one job: copy that picture to
+<output directory>/entry.png and prove the copy is good. It needs
+nothing beyond the Python 3.13 standard library, because the grading
+sandbox installs nothing before it runs.
 
-Contract with the grader:
-  - exit code 0 means entry.png was written and verified;
-  - any failure prints a single "error: ..." line and exits non-zero,
-    so the grader can tell a broken entry from a successful one.
+The gate is strict about what it accepts: a complete PNG or JPEG no
+bigger than 1 MiB and no wider or taller than 1024 pixels. So before
+anything is copied, the artwork is measured against every one of
+those rules — the 8-byte signature, the width and height read
+straight out of the IHDR chunk, the file size, and a trailing IEND
+chunk proving the file is whole. A picture that breaks a rule is
+refused with a plain error message instead of quietly producing an
+entry the gate would throw out. After the copy, the result is checked
+again (same byte count, same header, IEND still present), so a
+truncated or corrupted write cannot slip through either.
 
-It needs nothing but the Python 3.13 standard library, because the
-grading sandbox installs nothing before it runs this script.
+How the outcome is reported:
+  - exit code 0 means entry.png was written and double-checked;
+  - anything else prints one "error: ..." line to stderr and exits
+    non-zero, so the grader can tell a broken entry from a good one.
 """
 
 import os
@@ -34,19 +36,25 @@ import shutil
 import struct
 import sys
 
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-MAX_BYTES = 1_048_576          # gate limit: at most 1 MiB
-MAX_DIMENSION = 1024           # gate limit: at most 1024x1024 pixels
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+BYTE_CEILING = 1_048_576          # gate limit: at most 1 MiB
+EDGE_LIMIT = 1024                # gate limit: at most 1024x1024 pixels
 
 
-def png_dimensions(path: str):
-    """Return (width, height) from the PNG IHDR chunk, or None if unreadable."""
+def die(message: str) -> int:
+    """Print one error line and hand back the failure exit code."""
+    print(f"error: {message}", file=sys.stderr)
+    return 1
+
+
+def read_png_size(path: str):
+    """Pull (width, height) out of the PNG IHDR chunk, or None if unreadable."""
     try:
         with open(path, "rb") as handle:
             header = handle.read(24)
     except OSError:
         return None
-    if len(header) < 24 or header[:8] != PNG_SIGNATURE:
+    if len(header) < 24 or header[:8] != PNG_MAGIC:
         return None
     if header[12:16] != b"IHDR":
         return None
@@ -54,8 +62,8 @@ def png_dimensions(path: str):
     return width, height
 
 
-def png_is_whole(path: str) -> bool:
-    """True when the file ends with a PNG IEND chunk (a whole image)."""
+def has_iend_tail(path: str) -> bool:
+    """True when the file ends with a PNG IEND chunk, i.e. it is whole."""
     try:
         with open(path, "rb") as handle:
             handle.seek(-12, os.SEEK_END)
@@ -65,49 +73,83 @@ def png_is_whole(path: str) -> bool:
     return len(tail) == 12 and tail[4:8] == b"IEND"
 
 
-def fail(message: str) -> int:
-    """Report a problem on stderr and return the failure exit code."""
-    print(f"error: {message}", file=sys.stderr)
-    return 1
+def validate_artwork(path: str) -> list:
+    """Check the artwork against every gate rule.
+
+    Returns a list of problems, in the order they should be reported;
+    an empty list means the picture is fine to submit. The cheapest
+    checks run first, so a bad entry is refused on the first thing
+    wrong with it instead of failing later with a vaguer message.
+    """
+    if not os.path.isfile(path):
+        return [f"art.png is missing: expected it at {path}"]
+
+    problems = []
+    size = read_png_size(path)
+    if size is None:
+        problems.append("art.png does not start with a valid PNG header")
+        return problems
+    width, height = size
+    if width > EDGE_LIMIT or height > EDGE_LIMIT:
+        problems.append(
+            f"art.png is {width}x{height}, over the {EDGE_LIMIT}x{EDGE_LIMIT} limit"
+        )
+
+    nbytes = os.path.getsize(path)
+    if nbytes > BYTE_CEILING:
+        problems.append(f"art.png is {nbytes} bytes, over the {BYTE_CEILING} byte limit")
+
+    if not has_iend_tail(path):
+        problems.append("art.png does not end with a PNG IEND chunk (not a whole image)")
+
+    return problems
+
+
+def write_entry(artwork: str, entry_path: str):
+    """Copy the artwork to entry_path and check the copy.
+
+    Returns (error, bytes, width, height): error is None on success,
+    otherwise a message describing what went wrong with the copy.
+    The copy is only trusted once its byte count, its header and its
+    IEND tail all match the original.
+    """
+    shutil.copyfile(artwork, entry_path)
+
+    copied = os.path.getsize(entry_path)
+    original = os.path.getsize(artwork)
+    if copied != original:
+        return f"copy incomplete: {copied} of {original} bytes written", 0, 0, 0
+
+    if read_png_size(entry_path) != read_png_size(artwork):
+        return "entry.png header does not match art.png after copying", 0, 0, 0
+
+    if not has_iend_tail(entry_path):
+        return "entry.png is not a whole PNG after copying (no IEND chunk)", 0, 0, 0
+
+    width, height = read_png_size(entry_path)
+    return None, copied, width, height
 
 
 def main() -> int:
-    repo_dir = os.path.dirname(os.path.abspath(__file__))
-    source = os.path.join(repo_dir, "art.png")
+    here = os.path.dirname(os.path.abspath(__file__))
+    artwork = os.path.join(here, "art.png")
 
-    if not os.path.isfile(source):
-        return fail("art.png is missing from this repository")
+    problems = validate_artwork(artwork)
+    if problems:
+        return die(problems[0])
 
-    dimensions = png_dimensions(source)
-    if dimensions is None:
-        return fail("art.png does not start with a valid PNG header")
-    width, height = dimensions
-    if width > MAX_DIMENSION or height > MAX_DIMENSION:
-        return fail(
-            f"art.png is {width}x{height}, over the {MAX_DIMENSION}x{MAX_DIMENSION} limit"
-        )
+    target_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except OSError as exc:
+        return die(f"cannot create output directory {target_dir}: {exc}")
+    entry_path = os.path.join(target_dir, "entry.png")
 
-    size = os.path.getsize(source)
-    if size > MAX_BYTES:
-        return fail(f"art.png is {size} bytes, over the {MAX_BYTES} byte limit")
+    error, copied, width, height = write_entry(artwork, entry_path)
+    if error is not None:
+        return die(error)
 
-    if not png_is_whole(source):
-        return fail("art.png does not end with a PNG IEND chunk (not a whole image)")
-
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    os.makedirs(out_dir, exist_ok=True)
-
-    destination = os.path.join(out_dir, "entry.png")
-    shutil.copyfile(source, destination)
-
-    copied = os.path.getsize(destination)
-    if copied != size:
-        return fail(f"copy incomplete: {copied} of {size} bytes written")
-
-    if png_dimensions(destination) != dimensions:
-        return fail("entry.png header does not match art.png after copying")
-
-    print(f"wrote {destination} ({copied} bytes, {width}x{height})")
+    print(f"wrote {entry_path} ({copied} bytes, {width}x{height})")
     return 0
 
 
