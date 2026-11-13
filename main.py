@@ -2,18 +2,23 @@
 """Entry program for make.fun's "Make the AI judge happy" bounty.
 
 The artwork, "Golden Hour Joy", is already in this repository as art.png:
-a golden retriever puppy laughing mid-leap in a sun-drenched wildflower
-meadow at golden hour, butterflies all around it. This script does the
-only thing the entry needs: it places a copy of that image where the
-grader looks for it, at <output directory>/entry.png.
+a baby elephant calf splashing in a shallow puddle at golden-hour
+sunset, trunk raised high spraying a sparkling arc of water, ears
+flared wide, eyes squeezed shut in delight, warm orange-pink sky all
+around it. A single joyful moment, not a stock scene: the calf is big
+in the frame, the spray catches the low sun like sparks, and the whole
+image pulls toward one warm mood. This script does the only thing the
+entry needs: it places a copy of that image where the grader looks for
+it, at <output directory>/entry.png.
 
 The gate scorer only accepts a whole PNG or JPEG of at most 1 MiB and at
 most 1024x1024 pixels, so before copying this script enforces exactly
 those limits on art.png: it checks the 8-byte PNG signature, reads the
-width and height straight out of the IHDR chunk, and checks the file size.
-Anything over the limits fails loudly instead of silently producing an
-entry the grader rejects. After copying it compares byte sizes, so a
-corrupt or truncated file fails loudly too.
+width and height straight out of the IHDR chunk, and checks the file
+size. Anything over the limits fails loudly instead of silently
+producing an entry the grader rejects. After copying it compares byte
+sizes and re-reads the output file's PNG header, so a corrupt or
+truncated file fails loudly too.
 
 Contract with the grader:
   - exit code 0 means entry.png was written and verified;
@@ -49,6 +54,17 @@ def png_dimensions(path: str):
     return width, height
 
 
+def png_is_whole(path: str) -> bool:
+    """True when the file ends with a PNG IEND chunk (a whole image)."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(-12, os.SEEK_END)
+            tail = handle.read(12)
+    except OSError:
+        return False
+    return len(tail) == 12 and tail[4:8] == b"IEND"
+
+
 def fail(message: str) -> int:
     """Report a problem on stderr and return the failure exit code."""
     print(f"error: {message}", file=sys.stderr)
@@ -62,19 +78,21 @@ def main() -> int:
     if not os.path.isfile(source):
         return fail("art.png is missing from this repository")
 
-    size = os.path.getsize(source)
-    if size > MAX_BYTES:
-        return fail(f"art.png is {size} bytes, over the {MAX_BYTES} byte limit")
-
     dimensions = png_dimensions(source)
     if dimensions is None:
         return fail("art.png does not start with a valid PNG header")
     width, height = dimensions
     if width > MAX_DIMENSION or height > MAX_DIMENSION:
         return fail(
-            f"art.png is {width}x{height}, over the "
-            f"{MAX_DIMENSION}x{MAX_DIMENSION} limit"
+            f"art.png is {width}x{height}, over the {MAX_DIMENSION}x{MAX_DIMENSION} limit"
         )
+
+    size = os.path.getsize(source)
+    if size > MAX_BYTES:
+        return fail(f"art.png is {size} bytes, over the {MAX_BYTES} byte limit")
+
+    if not png_is_whole(source):
+        return fail("art.png does not end with a PNG IEND chunk (not a whole image)")
 
     out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     os.makedirs(out_dir, exist_ok=True)
@@ -86,11 +104,8 @@ def main() -> int:
     if copied != size:
         return fail(f"copy incomplete: {copied} of {size} bytes written")
 
-    out_dimensions = png_dimensions(destination)
-    if out_dimensions != dimensions:
-        return fail(
-            f"output header mismatch: {out_dimensions} instead of {dimensions}"
-        )
+    if png_dimensions(destination) != dimensions:
+        return fail("entry.png header does not match art.png after copying")
 
     print(f"wrote {destination} ({copied} bytes, {width}x{height})")
     return 0
